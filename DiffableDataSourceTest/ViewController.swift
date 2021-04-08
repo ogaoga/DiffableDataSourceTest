@@ -9,88 +9,67 @@ import UIKit
 import Combine
 
 class ViewController: UIViewController {
+
+    typealias Section = Type
+    typealias Row = Icon
     
-    private let viewModel = ViewModel()
-    
+    private let model = Model()
     private var collectionView: UICollectionView! = nil
-    var dataSource: UICollectionViewDiffableDataSource<Section, Row>! = nil
+    private var diffableDataSource: UICollectionViewDiffableDataSource<Section, Row>! = nil
+    private var cancellables: Set<AnyCancellable> = []
 
-    private var cancellables = Set<AnyCancellable>()
-
+    private static let headerHeight: CGFloat = 44.0
+    private static let sectionHeaderElementKind = "section-header-element-kind"
+    
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        // Configurations
         configureHierarchy()
         configureDataSource()
 
-        // Subscribe rows
-        viewModel.$rows
-            .receive(on: RunLoop.main)
-            .sink { rows in
+        // Subscribe data
+        model.$data
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                guard let self = self else { return }
+                
                 var snapshot = NSDiffableDataSourceSnapshot<Section, Row>()
-                snapshot.appendSections([.main])
-                snapshot.appendItems(self.viewModel.rows)
-                self.dataSource.apply(snapshot, animatingDifferences: true)
+                snapshot.appendSections(Type.allCases)
+                data.forEach {
+                    snapshot.appendItems([$0], toSection: $0.type)
+                }
+                self.diffableDataSource.apply(snapshot, animatingDifferences: true)
             }
             .store(in: &cancellables)
     }
-    
-    override func viewWillDisappear(_ animated: Bool) {
-        cancellables.forEach { $0.cancel() }
-        super.viewWillDisappear(animated)
-    }
-    
-    private func deleteRows(_ rows: [Row]) {
-        var snapshot = self.dataSource.snapshot()
-        snapshot.deleteItems(rows)
-        self.dataSource.apply(snapshot, animatingDifferences: true)
-    }
-    
-    private func reloadRows(_ rows: [Row]) {
-        var snapshot = self.dataSource.snapshot()
-        snapshot.reloadItems(rows)
-        self.dataSource.apply(snapshot, animatingDifferences: true)
-    }
 }
+
+// MARK: - Collection View
 
 extension ViewController {
     private func createLayout() -> UICollectionViewLayout {
-        let actionDeley = 0.6
-        var config = UICollectionLayoutListConfiguration(appearance: .plain)
-        // Swipe Actions
-        config.leadingSwipeActionsConfigurationProvider = { indexPath in
-            let incrementAction = UIContextualAction(style: .normal, title: "Increment") { (action, view, completion) in
-                if let row = self.dataSource.itemIdentifier(for: indexPath) {
-                    // increment data
-                    DispatchQueue.main.asyncAfter(deadline: .now() + actionDeley) {
-                        self.viewModel.increment(row: row)                        
-                    }
-                    completion(true)
-                } else {
-                    completion(false)
-                }
-            }
-            incrementAction.image = UIImage(systemName: "plus")
-            return UISwipeActionsConfiguration(actions: [incrementAction])
+        return UICollectionViewCompositionalLayout() { sectionIndex, layoutEnvironment in
+            // List
+            let configuration = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
+            let section = NSCollectionLayoutSection.list(
+                using: configuration, layoutEnvironment: layoutEnvironment
+            )
+            // Header
+            let headerSize = NSCollectionLayoutSize(
+                widthDimension: .fractionalWidth(1.0),
+                heightDimension: .estimated(ViewController.headerHeight)
+            )
+            let sectionHeader = NSCollectionLayoutBoundarySupplementaryItem(
+                layoutSize: headerSize,
+                elementKind: ViewController.sectionHeaderElementKind,
+                alignment: .top
+            )
+            section.boundarySupplementaryItems = [sectionHeader]
+            return section
         }
-        config.trailingSwipeActionsConfigurationProvider = { indexPath in
-            let deleteAction = UIContextualAction(style: .destructive, title: "Delete") { (action, view, completion) in
-                if let row = self.dataSource.itemIdentifier(for: indexPath) {
-                    // delete from data
-                    self.viewModel.delete(row: row)
-                    completion(true)
-                } else {
-                    completion(false)
-                }
-            }
-            deleteAction.image = UIImage(systemName: "trash")
-            let swipeActionsConfig = UISwipeActionsConfiguration(actions: [deleteAction])
-            swipeActionsConfig.performsFirstActionWithFullSwipe = false
-            return swipeActionsConfig
-        }
-        return UICollectionViewCompositionalLayout.list(using: config)
     }
-    
+
     private func configureHierarchy() {
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: createLayout())
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -98,28 +77,65 @@ extension ViewController {
         collectionView.delegate = self
         view.addSubview(collectionView)
     }
-    
+
     private func configureDataSource() {
-        let cellRegistration = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { (cell, indexPath, row) in
+        
+        // Cell
+        
+        let cellRegistration = UICollectionView.CellRegistration<UICollectionViewListCell, Row> {
+            (cell, indexPath, row) in
             // Content
-            let row = self.viewModel.rows[indexPath.row]
-            var content = cell.defaultContentConfiguration()
-            content.text = row.name
-            content.secondaryText = "\(row.count)"
-            cell.contentConfiguration = content
-            // Accessaries
-            cell.accessories = [.disclosureIndicator(displayed: .whenNotEditing)]
+            var config = UIListContentConfiguration.valueCell()
+            config.text = row.name
+            config.image = row.image
+            config.secondaryText = "\(row.value)"
+            cell.contentConfiguration = config
         }
-        dataSource = UICollectionViewDiffableDataSource<Section, Row>(collectionView: collectionView) {
-            (collectionView: UICollectionView, indexPath: IndexPath, identifier: Row) -> UICollectionViewCell? in
-            return collectionView.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: identifier)
+        diffableDataSource = UICollectionViewDiffableDataSource<Section, Row>(
+            collectionView: collectionView
+        ) {
+            (collectionView: UICollectionView, indexPath: IndexPath, row: Row)
+                -> UICollectionViewCell? in
+            return collectionView.dequeueConfiguredReusableCell(
+                using: cellRegistration,
+                for: indexPath,
+                item: row
+            )
+        }
+        
+        // Header
+        
+        let headerRegistration = UICollectionView.SupplementaryRegistration<UICollectionViewListCell>(
+            elementKind: ViewController.sectionHeaderElementKind
+        ) { (supplementaryView, string, indexPath) in
+            var config = UIListContentConfiguration.plainHeader()
+            config.text = Type.allCases[indexPath.section].rawValue
+            supplementaryView.contentConfiguration = config
+        }
+    
+        diffableDataSource.supplementaryViewProvider = { (view, kind, index) in
+            switch kind {
+            case ViewController.sectionHeaderElementKind:
+                return self.collectionView.dequeueConfiguredReusableSupplementary(
+                    using: headerRegistration,
+                    for: index
+                )
+            default:
+                return nil
+            }
         }
     }
 }
 
+// MARK: - UICollectionViewDelegate
+
 extension ViewController: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        print(indexPath)
         collectionView.deselectItem(at: indexPath, animated: true)
+        
+        // selected
+        if let selected = diffableDataSource.itemIdentifier(for: indexPath) {
+            model.increment(id: selected.id)
+        }
     }
 }
